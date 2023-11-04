@@ -31,7 +31,6 @@ class Message(SQLModel, table=True):
     content: str
     timestamp: datetime = Field(default=datetime.now())
     sender_id: int = ForeignKey("user.id")
-    group_id: int = ForeignKey("group.id", nullable=True)
 
 class DirectMessage(SQLModel, table=True):
     id: int = Field(primary_key=True)

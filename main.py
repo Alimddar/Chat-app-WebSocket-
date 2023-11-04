@@ -1,14 +1,13 @@
-from fastapi import FastAPI,Depends,HTTPException,WebSocket
+import json
+from fastapi import FastAPI,Depends,HTTPException,WebSocket,Request
+from fastapi.encoders import jsonable_encoder
 from fastapi import (
     Cookie,
-    Depends,
-    FastAPI,
     Query,
-    WebSocket,
     WebSocketException,
-
     status,
 )
+from fastapi.responses import RedirectResponse
 from typing import List
 from sqlmodel import SQLModel, Session, create_engine, select
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +16,7 @@ from sqlalchemy.orm import aliased
 from fastapi.responses import HTMLResponse
 import threading
 import bcrypt
+from fastapi.templating import Jinja2Templates
 
 
 db_url = 'app.db'
@@ -42,14 +42,23 @@ html = """
         <ul id='messages'>
         </ul>
         <script>
-            var ws = new WebSocket("ws://192.168.0.103:8000/ws");
             ws.onmessage = function(event) {
-                var messages = document.getElementById('messages')
-                var message = document.createElement('li')
-                var content = document.createTextNode(event.data)
-                message.appendChild(content)
-                messages.appendChild(message)
+            var messages = document.getElementById('message-area');
+            var incomingMessages = JSON.parse(event.data);
+
+            incomingMessages.forEach((msg) => {
+                var message = document.createElement('div');
+                message.classList.add('message');
+                message.textContent = msg.content; // Assuming 'content' is the field name of the message
+                if (msg.sender_id === 1) { // Replace 1 with the actual user's id
+                    message.classList.add('own-message');
+                }
+                messages.appendChild(message);
+                });
+
+            messages.scrollTop = messages.scrollHeight;
             };
+
             function sendMessage(event) {
                 var input = document.getElementById("messageText")
                 ws.send(input.value)
@@ -75,6 +84,7 @@ origins = [
     "http://192.168.0.103:8000"
 ]
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -82,6 +92,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+templates = Jinja2Templates(directory="client/Chat-App-Frontend")
+
+@app.get("/")
+async def root(request: Request):
+    return templates.TemplateResponse("chat.html", {"request": request})
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -99,14 +115,9 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-
 def hash_password(password: str) -> str:
     hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
     return hashed_pw.decode('utf-8')
-
-@app.get("/")
-async def get():
-    return HTMLResponse(html)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -114,13 +125,33 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            await manager.broadcast(f"Message text was: {data}")  
-    except WebSocketException:
-        pass
+            with get_db() as db:
+                new_message = Message(content=data, sender_id=1) 
+                db.add(new_message)
+                db.commit()
+                db.refresh(new_message)
+
+                message_data = jsonable_encoder(new_message)
+                await manager.broadcast(json.dumps([message_data]))  
+    except WebSocketException as e:
+        print(f"WebSocket disconnected: {e}")
     finally:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
+
+@app.delete("/messages")
+def delete_messages(session: Session = Depends(get_db)):
+    session.query(Message).delete()
+    session.commit()
+    return {"status": "success", "message": "All messages have been deleted."}
 
 
+@app.get("/messages")
+def get_messages(session: Session = Depends(get_db)):
+    statement = select(Message)
+    results = session.execute(statement)
+    messages = results.scalars().all()  
+    return messages
+    
 @app.post("/create_user/",tags=['user'])
 def create_user_endpoint(username: str, email: str, password: str, session: Session = Depends(get_db)):
     user = User(username=username, email=email, password=hash_password(password))
